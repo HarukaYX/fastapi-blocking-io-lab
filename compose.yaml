@@ -1,6 +1,6 @@
 services:
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:4.7.0  # latest(2026.x) はライセンストークン必須になったため、無料で動く 4.x に固定
     environment:
       - SERVICES=sqs
     ports:
