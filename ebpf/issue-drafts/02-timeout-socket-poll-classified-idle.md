@@ -47,13 +47,13 @@ traced 956 I/O operations in total; 956 below the 1.0ms display threshold were n
 {"pid":3071,"tid":3071,"comm":"uvicorn","fd":-1,"op":"poll","duration_ms":5033.57,"ret":1,"nonblock":-1,"via_epoll":false,"verdict":"IDLE"}
 ```
 
-## 原因ではないかと思っている点（AI の説明をもとにしたもので、確信はありません）
+## 原因と思われる点
 
-### (1) タイムアウト付きソケットの待ちは `recvfrom` ではなく `poll` に出るらしい
+### (1) 5 秒の待ちが `recvfrom` ではなく `poll` として記録され、`IDLE` に分類されている
 
 botocore はソケットに timeout を設定しており、CPython は timeout 付きソケットを内部でノンブロッキングにして
-`poll()` で読めるようになるまで待つ実装になっている、と教えてもらいました。そのため 5 秒のブロックが `recvfrom` ではなく
-`poll` の所要時間として現れているようです。
+`poll()` で読めるようになるまで待つ実装になっているそうです（この部分は AI の説明によるもので、私自身は確認しきれていません）。
+そのため 5 秒のブロックが `recvfrom` ではなく `poll` の所要時間として現れているようです。
 
 現在の `classify` では `epoll_wait` / `poll` / `select` がまとめて `V_IDLE` になっているため、ループスレッド上で
 `poll` が 5 秒待っていても正常扱いになっている、という理解です。「asyncio のループ自身の待ちは `epoll_wait` なので、
@@ -63,10 +63,10 @@ botocore はソケットに timeout を設定しており、CPython は timeout 
 また `sys_enter_poll` の probe で `loop_tid` が立つため、`def` エンドポイントなどワーカースレッドで `poll` を呼んだ場合も
 ループスレッド扱いになるように見えました。
 
-### (2) uvloop だとループスレッドが識別されないらしい
+### (2) uvloop 使用時、ループスレッドが `loop_tid` に登録されない
 
 `uvicorn[standard]` は uvloop を使い、uvloop（libuv）は `epoll_wait` ではなく `epoll_pwait` を呼ぶそうです。
-`cat /proc/<pid>/syscall` でメインスレッドが 281（x86_64 の epoll_pwait）で待っているのは確認できました。
+`cat /proc/<pid>/syscall` でメインスレッドが 281（x86_64 の epoll_pwait）で待っていることは確認しました。
 現在は `sys_enter_epoll_wait` でだけ `loop_tid` を立てているので、uvloop のループスレッドは識別されず、
 既定モードでは STALL にならないようです（`--all-threads` を付けると出ました）。
 
