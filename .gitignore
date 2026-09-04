@@ -4,3 +4,7 @@ __pycache__/
 .ruff_cache/
 results/
 *.jsonl
+
+# eBPF の計測ログは残す
+!ebpf/results/
+!ebpf/results/*

@@ -1,0 +1,4 @@
+Tracing blocking I/O for PID 3071 for 45.0s (showing >=1.0ms, stall >=50.0ms)… Ctrl-C to stop
+=== summary (0 events, 0 blocking, 0 stalls, 45.0s) ===
+(no events matched)
+traced 956 I/O operations in total; 956 below the 1.0ms display threshold were not shown

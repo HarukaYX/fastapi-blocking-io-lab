@@ -82,6 +82,8 @@ Executing <Task finished name='Task-3' coro=<RequestResponseCycle.run_asgi() don
 - `asyncio.to_thread` 版で「どのスレッドで動いたか」をハンドラの中で取ると MainThread になる（await の後はループに戻っている）。
   boto3 を呼んだ関数の中でスレッド名を取る必要がある
 
-## 未実施
+## eBPF（blocking-io-check-py）での検出
 
-- eBPF（blocking-io-check-py）での検出。Linux 環境が必要。手順は `ebpf/README.md`
+Colima の x86_64 Ubuntu VM で実施。ツールは無改造では動かず（BCC 0.29.1 のマクロ非互換、タイムアウト付きソケットの `poll` を
+IDLE 扱い、uvloop の `epoll_pwait` 未対応）、`ebpf/blocking-io-check-py.patch` を当てた結果、`/async-boto3` のみ `poll` 約5秒 × 3 が
+`STALL`、他は 0 件。詳細と生ログは `ebpf/README.md` と `ebpf/results/`。

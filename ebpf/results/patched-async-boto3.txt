@@ -1,0 +1,8 @@
+Tracing blocking I/O for PID 3071 for 40.0s (showing >=1.0ms, stall >=50.0ms)… Ctrl-C to stop
+08:57:21.755 pid=  3071 comm=uvicorn          fd=-1   op=poll       dur=  5019.849ms ret=1      flags=?--- peer=-                        verdict=STALL
+08:57:26.814 pid=  3071 comm=uvicorn          fd=-1   op=poll       dur=  5020.423ms ret=1      flags=?--- peer=-                        verdict=STALL
+08:57:31.860 pid=  3071 comm=uvicorn          fd=-1   op=poll       dur=  5017.967ms ret=1      flags=?--- peer=-                        verdict=STALL
+=== summary (3 events, 3 blocking, 3 stalls, 40.1s) ===
+comm     pid   op    peer  count  block  stall     total       max       p50       p95       p99
+uvicorn  3071  poll  -         3      3      3  15058.24  5020.423  5019.849  5020.423  5020.423
+traced 556 I/O operations in total; 553 below the 1.0ms display threshold were not shown

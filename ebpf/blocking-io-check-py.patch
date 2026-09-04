@@ -1,0 +1,78 @@
+diff --git a/blockingio/bpf/trace.bpf.c b/blockingio/bpf/trace.bpf.c
+index d30df8c..2245cd1 100644
+--- a/blockingio/bpf/trace.bpf.c
++++ b/blockingio/bpf/trace.bpf.c
+@@ -103,9 +103,9 @@ struct connect_ctx_t { int fd; void *uaddr; };
+ struct accept_ctx_t  { void *upeer; int flags; };
+ struct fcntl_ctx_t   { int fd; int cmd; };
+ 
+-BPF_LRU_HASH(fd_nonblock, struct key_t, u8, 65536);
+-BPF_LRU_HASH(fd_epoll,    struct key_t, u8, 65536);
+-BPF_LRU_HASH(peer_map,    struct key_t, struct peer_t, 65536);
++BPF_TABLE("lru_hash", struct key_t, u8, fd_nonblock, 65536);
++BPF_TABLE("lru_hash", struct key_t, u8, fd_epoll, 65536);
++BPF_TABLE("lru_hash", struct key_t, struct peer_t, peer_map, 65536);
+ BPF_HASH(io_start,    u64, struct io_start_t, 16384);
+ BPF_HASH(connect_ctx, u64, struct connect_ctx_t, 4096);
+ BPF_HASH(accept_ctx,  u64, struct accept_ctx_t, 4096);
+@@ -210,7 +210,17 @@ static __always_inline void remember_peer(u32 pid, int fd, struct io_evt_t *e) {
+ // 判定。規則: epoll に登録されていないブロッキング fd が閾値を超えたら STALL。
+ // nonblock が unknown のときは決して STALL にしない。
+ static __always_inline int classify(struct io_evt_t *e) {
+-    if (op_is_wait(e->op)) return V_IDLE;        // 待機系は長くても正常
++    if (e->op == OP_EPOLL_WAIT) return V_IDLE;   // ループ自身のアイドル待ちは正常
++    if (e->op == OP_POLL || e->op == OP_SELECT) {
++        // タイムアウト付きソケット（CPython は内部でノンブロッキング化して poll で待つ）など、
++        // poll/select で待つ同期 I/O。ループスレッド上で閾値を超えたら STALL。
++        if (e->duration_ns < STALL_NS) return V_OK;
++#if {REQUIRE_LOOP_THREAD}
++        u64 tkey_w = ((u64)e->pid << 32) | e->tid;
++        if (!loop_tid.lookup(&tkey_w)) return V_OK;
++#endif
++        return V_STALL;
++    }
+     if (e->msg_dontwait)   return V_OK;          // 明示的に待たない指定
+ 
+     if (e->nonblock == NB_NONBLOCK) {
+@@ -536,11 +546,26 @@ TRACEPOINT_PROBE(syscalls, sys_enter_epoll_wait) {
+ }
+ TRACEPOINT_PROBE(syscalls, sys_exit_epoll_wait) { return io_exit(args, (long)args->ret); }
+ 
+-TRACEPOINT_PROBE(syscalls, sys_enter_poll) {
++// uvloop(libuv) は epoll_wait ではなく epoll_pwait を使う。uvicorn[standard] の既定は uvloop。
++TRACEPOINT_PROBE(syscalls, sys_enter_epoll_pwait) {
+     if (!is_target()) return 0;
+     u64 tkey = bpf_get_current_pid_tgid();
+     u8 one = 1;
+     loop_tid.update(&tkey, &one);
++    return io_enter(-1, OP_EPOLL_WAIT, NULL, 0);
++}
++TRACEPOINT_PROBE(syscalls, sys_exit_epoll_pwait) { return io_exit(args, (long)args->ret); }
++TRACEPOINT_PROBE(syscalls, sys_enter_epoll_pwait2) {
++    if (!is_target()) return 0;
++    u64 tkey = bpf_get_current_pid_tgid();
++    u8 one = 1;
++    loop_tid.update(&tkey, &one);
++    return io_enter(-1, OP_EPOLL_WAIT, NULL, 0);
++}
++TRACEPOINT_PROBE(syscalls, sys_exit_epoll_pwait2) { return io_exit(args, (long)args->ret); }
++
++TRACEPOINT_PROBE(syscalls, sys_enter_poll) {
++    if (!is_target()) return 0;
+     return io_enter(-1, OP_POLL, NULL, 0);
+ }
+ TRACEPOINT_PROBE(syscalls, sys_exit_poll) { return io_exit(args, (long)args->ret); }
+@@ -559,6 +584,13 @@ TRACEPOINT_PROBE(syscalls, sys_enter_epoll_wait) {
+     loop_tid.update(&tkey, &one);
+     return 0;
+ }
++TRACEPOINT_PROBE(syscalls, sys_enter_epoll_pwait) {
++    if (!is_target()) return 0;
++    u64 tkey = bpf_get_current_pid_tgid();
++    u8 one = 1;
++    loop_tid.update(&tkey, &one);
++    return 0;
++}
+ #endif
+ 
+ /* ---- ファイル I/O ----

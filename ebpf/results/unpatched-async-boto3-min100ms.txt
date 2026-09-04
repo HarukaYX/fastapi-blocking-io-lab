@@ -1,0 +1,5 @@
+Tracing blocking I/O for PID 3071 for 40.0s (showing >=100.0ms, stall >=50.0ms)… Ctrl-C to stop
+=== summary (1 events, 0 blocking, 0 stalls, 40.1s) ===
+comm     op    count  block  stall     total       max       p50       p95       p99
+uvicorn  poll      1      0      0   5033.57  5033.570  5033.570  5033.570  5033.570
+traced 39 I/O operations in total; 38 below the 100.0ms display threshold were not shown
