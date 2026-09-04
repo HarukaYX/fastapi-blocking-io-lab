@@ -5,8 +5,14 @@
 
 ## 動かす環境
 
-eBPF は Linux カーネルの機能なので、**macOS 上では直接動かない**。Docker Desktop の Linux VM 内で動かすのは
-カーネルヘッダの都合で BCC が失敗しがちなので、次のどちらかを推奨する。
+eBPF は Linux カーネルの機能なので、**macOS 上では直接動かない**。
+
+Docker Desktop の Linux VM 内で動かすことも試したが（2026-09-04、Docker Desktop 28.4 / kernel 6.10.14-linuxkit arm64）、
+BCC が `Unable to find kernel headers` で失敗する。BPF syscall・kprobe・uprobe・BTF は有効なのに、
+`CONFIG_IKHEADERS` が無効で `/lib/modules/$(uname -r)/build` も無いため、BCC が BPF プログラムをコンパイルできない。
+`--privileged --pid=host` にしても変わらない。カーネル側の問題なのでコンテナ側では回避できない。
+
+そのため次のどちらかを推奨する。
 
 - **EC2（Ubuntu 24.04 など）**に Docker を入れて、このリポジトリを clone して動かす
 - **Mac 上の Linux VM**（[Multipass](https://multipass.run/) や [Lima](https://lima-vm.io/)）に Docker と BCC を入れて動かす
