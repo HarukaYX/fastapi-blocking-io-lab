@@ -1,17 +1,25 @@
 # タイトル案
-タイムアウト付きソケット（boto3 など）の `poll` がループスレッド上で 5 秒待っても `IDLE` になり、STALL として検出されない
+FastAPI の `async def` 内で boto3 を呼んでイベントループが止まるケースが、STALL として検出されなかった（報告）
 
 # 本文
 
-PyCon JP 2026 の LT を拝見して、FastAPI の `async def` の中で boto3 を呼んでイベントループが止まる例を、このツールで検出できるか
-試しました。実際にループは止まっているのに（別エンドポイント `/ping` の応答が 15 秒待たされる）、ツールの判定は **0 stalls** でした。
-原因と思われる点を 2 つ報告します。
+はじめまして。PyCon JP 2026 の LT を拝見して、FastAPI の `async def` の中で boto3 を呼んでイベントループが止まる例を、
+このツールで検出できるか試させていただきました。
+
+先にお断りしておくと、私は OS や C 言語、eBPF についての知見がほとんどありません。以下の原因の推測や試した変更は、
+Claude Code（AI）に手伝ってもらいながら進めたもので、私自身が中身を十分に理解できているわけではありません。
+推測が的外れだったり、ツールの設計意図を私が取り違えている可能性もあると思います。その場合はご容赦ください。
+
+## 起きたこと
+
+実際にはイベントループが止まっている（同じプロセスの別エンドポイント `/ping` の応答が 15 秒待たされる）のに、
+ツールの判定は **0 stalls** でした。
 
 ## 環境
 
-- Ubuntu 24.04.4 LTS（x86_64）、kernel 6.8.0-117-generic、BCC 0.29.1（#1 の回避策を当てた状態）
-- 対象: uvicorn 0.3x + FastAPI、`uvicorn[standard]`（uvloop あり）、1 ワーカー、Docker コンテナ内
-- ブロッキング処理: boto3 の `sqs.receive_message(WaitTimeSeconds=5)` を空キューに対して呼ぶ（きっちり 5 秒ブロック）
+- Ubuntu 24.04.4 LTS（x86_64）、kernel 6.8.0-117-generic、BCC 0.29.1（別 issue の `BPF_LRU_HASH` の回避策を当てた状態）
+- 対象: FastAPI + uvicorn（`uvicorn[standard]`、uvloop あり）、1 ワーカー、Docker コンテナ内
+- ブロッキング処理: boto3 の `sqs.receive_message(WaitTimeSeconds=5)` を空キューに対して呼ぶ（きっちり 5 秒ブロックします）
 
 ## 再現手順
 
@@ -32,35 +40,41 @@ docker compose run --rm load async-boto3           # async def の中で boto3 �
 traced 956 I/O operations in total; 956 below the 1.0ms display threshold were not shown
 ```
 
-`--min-latency 100 --json` で見ると、5 秒の待ちは記録されていて、`poll` として `IDLE` に分類されていました（tid = pid = イベントループのスレッド）。
+`--min-latency 100 --json` で見ると、5 秒の待ち自体は記録されていて、`poll` として `IDLE` に分類されていました
+（tid = pid なので、イベントループのスレッドだと思います）。
 
 ```json
 {"pid":3071,"tid":3071,"comm":"uvicorn","fd":-1,"op":"poll","duration_ms":5033.57,"ret":1,"nonblock":-1,"via_epoll":false,"verdict":"IDLE"}
 ```
 
-## 原因の推測（1）: タイムアウト付きソケットの待ちは `recvfrom` ではなく `poll` に出る
+## 原因ではないかと思っている点（AI の説明をもとにしたもので、確信はありません）
 
-botocore はソケットに timeout（既定 60 秒）を設定します。CPython は timeout 付きソケットを内部で `O_NONBLOCK` にし、
-`poll()` で読めるようになるまで待ってから `recv` する実装（`sock_call` → `internal_select`）なので、ブロックしている 5 秒は
-`recvfrom` ではなく `poll` の所要時間として現れます。
+### (1) タイムアウト付きソケットの待ちは `recvfrom` ではなく `poll` に出るらしい
 
-現在の `classify` は `epoll_wait` / `poll` / `select` を「待機系」としてまとめて `V_IDLE` にしているため、
-ループスレッド上で `poll` が 5 秒待っていても正常扱いになります。asyncio のループ自身の待ちは `epoll_wait` なので、
-`poll` / `select` がループスレッドで長く待つのは、ループのアイドルではなく別の同期 I/O だと考えられます。
+botocore はソケットに timeout を設定しており、CPython は timeout 付きソケットを内部でノンブロッキングにして
+`poll()` で読めるようになるまで待つ実装になっている、と教えてもらいました。そのため 5 秒のブロックが `recvfrom` ではなく
+`poll` の所要時間として現れているようです。
 
-また `sys_enter_poll` の probe が `loop_tid` を立てているため、ワーカースレッド（`def` エンドポイントや `run_in_executor`）で
-`poll` を呼んだスレッドもループスレッド扱いになります。
+現在の `classify` では `epoll_wait` / `poll` / `select` がまとめて `V_IDLE` になっているため、ループスレッド上で
+`poll` が 5 秒待っていても正常扱いになっている、という理解です。「asyncio のループ自身の待ちは `epoll_wait` なので、
+`poll` / `select` がループスレッドで長く待つのはループのアイドルではないのでは」という考え方もあるようですが、
+ツールの設計意図として意図的に IDLE にされている可能性もあり、判断はお任せします。
 
-## 原因の推測（2）: uvloop だとループスレッドが識別されない
+また `sys_enter_poll` の probe で `loop_tid` が立つため、`def` エンドポイントなどワーカースレッドで `poll` を呼んだ場合も
+ループスレッド扱いになるように見えました。
 
-`uvicorn[standard]` は uvloop を使い、uvloop（libuv）は `epoll_wait` ではなく `epoll_pwait` を呼びます。
-`cat /proc/<pid>/syscall` でメインスレッドが 281（x86_64 の epoll_pwait）で待っているのを確認しました。
-現在は `sys_enter_epoll_wait` だけで `loop_tid` を立てているので、uvloop のループスレッドは識別されず、
-`REQUIRE_LOOP_THREAD` が有効な既定モードでは STALL になりません（`--all-threads` を付けると出ます）。
+### (2) uvloop だとループスレッドが識別されないらしい
+
+`uvicorn[standard]` は uvloop を使い、uvloop（libuv）は `epoll_wait` ではなく `epoll_pwait` を呼ぶそうです。
+`cat /proc/<pid>/syscall` でメインスレッドが 281（x86_64 の epoll_pwait）で待っているのは確認できました。
+現在は `sys_enter_epoll_wait` でだけ `loop_tid` を立てているので、uvloop のループスレッドは識別されず、
+既定モードでは STALL にならないようです（`--all-threads` を付けると出ました）。
 
 ## 試した変更と結果
 
-手元で次の変更を当てると、期待どおりの判定になりました（C や eBPF の理解が浅いので PR ではなく参考として置きます）。
+参考までに、AI に提案してもらった変更を手元で当ててみたところ、期待していた判定になりました。
+内容を私が十分に説明できないため PR は出さず、差分を置いておくだけにします。もし方向性が合っていれば、
+作者様の手で正しい形にしていただけると嬉しいです。
 
 - `classify`: `epoll_wait` だけを `V_IDLE` にし、`poll` / `select` はループスレッド上で閾値以上なら `V_STALL`
 - `sys_enter_poll` から `loop_tid` の更新を外す
@@ -70,7 +84,7 @@ botocore はソケットに timeout（既定 60 秒）を設定します。CPyth
 
 | エンドポイント | 変更前 | 変更後 |
 |---|---|---|
-| `async def` + boto3 | 0 stalls | **STALL × 3**（`poll` 5019.8 / 5020.4 / 5018.0 ms） |
+| `async def` + boto3 | 0 stalls | STALL × 3（`poll` 5019.8 / 5020.4 / 5018.0 ms） |
 | `def` + boto3 | 0 stalls | 0 stalls |
 | `async def` + `asyncio.to_thread(boto3)` | 0 stalls | 0 stalls |
 | `async def` + aioboto3 | 0 stalls | 0 stalls |
@@ -82,7 +96,4 @@ comm     pid   op    peer  count  block  stall     total       max       p50    
 uvicorn  3071  poll  -         3      3      3  15058.24  5020.423  5019.849  5020.423  5020.423
 ```
 
-`poll` は fd が -1 で記録されるため peer が取れず、どの接続で待っていたかは分かりません。`poll` の `ufds` から fd を読めると
-さらに有用になりそうですが、そこまでは手を出せていません。
-
-素晴らしいツールをありがとうございます。LT もとても勉強になりました。
+長文になってしまい申し訳ありません。素晴らしいツールと LT をありがとうございました。
